@@ -302,7 +302,43 @@ class SpiralCodexHUD:
                                 json.dump(config, f, indent=2)
                             
                             st.success("✅ API keys saved successfully!")
-                            st.info("🔄 Reconnect to Exo to activate cloud providers")
+                            
+                            # Run pre-flight validation
+                            st.info("🔍 Running pre-flight validation...")
+                            
+                            # Import validator
+                            import sys
+                            sys.path.insert(0, 'src')
+                            from provider_preflight import get_preflight_validator
+                            
+                            validator = get_preflight_validator()
+                            
+                            # Validate updated providers
+                            for provider in config.get('providers', []):
+                                if provider.get('api_key') and provider['status'] == 'active':
+                                    name = provider['name']
+                                    result = validator.validate_provider(name, provider, force_refresh=True)
+                                    
+                                    if result.success:
+                                        st.success(f"✅ {name}: Validated - {len(result.available_models)} models available")
+                                    else:
+                                        st.error(f"❌ {name}: {result.error_message}")
+                                        
+                                        # Show fix steps
+                                        with st.expander(f"🔧 How to fix {name}", expanded=True):
+                                            st.markdown("**Fix Steps:**")
+                                            for step in result.fix_steps:
+                                                st.markdown(f"- {step}")
+                                            
+                                            if result.dashboard_url:
+                                                st.markdown(f"**Dashboard:** [{result.dashboard_url}]({result.dashboard_url})")
+                                            
+                                            if result.required_scopes:
+                                                st.markdown("**Required Permissions:**")
+                                                for scope in result.required_scopes:
+                                                    st.code(scope)
+                            
+                            st.info("🔄 Reconnect to Exo to apply validated providers")
                         else:
                             st.error(f"Config file not found: {config_path}")
                     except Exception as e:
@@ -683,38 +719,126 @@ class SpiralCodexHUD:
         st.plotly_chart(fig, use_container_width=True)
     
     def render_model_selector(self, status: Dict):
-        """Render model selection interface with chat"""
+        """Render model selection interface with chat - ONLY VALIDATED MODELS"""
         st.subheader("🤖 Model Testing & Chat Interface")
         
-        # Get available models from providers
-        available_models = ["llama-3.2-3b", "gpt-3.5-turbo", "gpt-4", "claude-3-sonnet"]
+        # Get validated models from providers
+        import sys
+        sys.path.insert(0, 'src')
+        from provider_preflight import get_preflight_validator
         
-        # Add models from Exo if available
+        validator = get_preflight_validator()
+        available_models = []
+        provider_map = {}  # Map model to provider
+        
+        # Get Exo models first (local, always available if cluster running)
         exo_models = status.get("exo", {}).get("available_models", [])
-        if exo_models:
-            available_models = exo_models + available_models
+        for model in exo_models:
+            available_models.append(f"[Exo Local] {model}")
+            provider_map[f"[Exo Local] {model}"] = "Exo Local"
+        
+        # Get validated cloud models
+        try:
+            import json
+            from pathlib import Path
+            config_path = Path.home() / ".token_manager_config.json"
+            
+            if config_path.exists():
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                
+                # Validate and get models from each provider
+                for provider in config.get('providers', []):
+                    if provider.get('status') == 'active' and provider.get('type') != 'local':
+                        name = provider['name']
+                        
+                        # Get validated models
+                        valid_models = validator.get_valid_models_for_ui(name, provider)
+                        
+                        for model in valid_models[:20]:  # Limit to 20 per provider
+                            display_name = f"[{name}] {model}"
+                            available_models.append(display_name)
+                            provider_map[display_name] = name
+        except Exception as e:
+            st.warning(f"Could not load cloud models: {e}")
+        
+        # If no models available, show warning
+        if not available_models:
+            st.warning("⚠️ No validated models available")
+            st.info("1. Ensure Exo is running OR\n2. Add cloud provider API keys in sidebar OR\n3. Click 'Check Health Now' to validate providers")
+            return
         
         # Model selection
         col1, col2 = st.columns([2, 1])
         
         with col1:
-            selected_model = st.selectbox(
+            selected_model_display = st.selectbox(
                 "Select Model",
                 options=available_models,
                 key="selected_model",
-                help="Choose a model to test. Exo models run locally (free), others use cloud APIs."
+                help="Only validated, available models are shown"
             )
         
         with col2:
             st.markdown("**Provider:**")
-            if "llama" in selected_model.lower():
+            provider_name = provider_map.get(selected_model_display, "Unknown")
+            if "Exo" in provider_name:
                 st.success("🟢 Exo Local (FREE)")
-            elif "gpt" in selected_model.lower():
-                st.info("☁️ OpenRouter")
-            elif "claude" in selected_model.lower():
-                st.info("☁️ OpenRouter")
             else:
-                st.info("☁️ Cloud Provider")
+                # Show validation status
+                if st.session_state.bridge_manager:
+                    # Check if provider is healthy
+                    try:
+                        health = st.session_state.bridge_manager.cloud_health_monitor.provider_health.get(provider_name)
+                        if health and health.healthy:
+                            st.success(f"☁️ {provider_name} ✅")
+                        else:
+                            st.warning(f"☁️ {provider_name} ⚠️")
+                    except:
+                        st.info(f"☁️ {provider_name}")
+                else:
+                    st.info(f"☁️ {provider_name}")
+        
+        # Extract actual model ID (remove provider prefix)
+        selected_model = selected_model_display.split('] ', 1)[-1] if ']' in selected_model_display else selected_model_display
+        
+        # Show validation info
+        if st.button("🔍 Validate This Model", key="validate_model"):
+            with st.spinner("Validating model..."):
+                provider_name = provider_map.get(selected_model_display, "Unknown")
+                
+                if provider_name != "Exo Local":
+                    # Load provider config
+                    try:
+                        import json
+                        from pathlib import Path
+                        config_path = Path.home() / ".token_manager_config.json"
+                        
+                        with open(config_path, 'r') as f:
+                            config = json.load(f)
+                        
+                        provider = next((p for p in config['providers'] if p['name'] == provider_name), None)
+                        
+                        if provider:
+                            result = validator.validate_provider(provider_name, provider, force_refresh=True)
+                            
+                            if result.success:
+                                st.success(f"✅ Model validated - {len(result.available_models)} models available")
+                                if selected_model in result.available_models:
+                                    st.info(f"✅ '{selected_model}' is available on {provider_name}")
+                                else:
+                                    st.warning(f"⚠️ '{selected_model}' not in validated list")
+                            else:
+                                st.error(f"❌ Validation failed: {result.error_message}")
+                                
+                                with st.expander("🔧 Fix Steps", expanded=True):
+                                    for step in result.fix_steps:
+                                        st.markdown(f"- {step}")
+                                    
+                                    if result.dashboard_url:
+                                        st.markdown(f"**Provider Dashboard:** [{result.dashboard_url}]({result.dashboard_url})")
+                    except Exception as e:
+                        st.error(f"Validation error: {e}")
         
         # Generation parameters
         st.markdown("### ⚙️ Generation Parameters")
@@ -770,6 +894,86 @@ class SpiralCodexHUD:
                 st.warning("Please enter a prompt")
                 return
             
+            # Pre-flight validation
+            st.info("🔍 Running pre-flight checks...")
+            
+            # Check tokenization first
+            import sys
+            sys.path.insert(0, 'src')
+            from intelligent_tokenizer import get_tokenizer
+            from provider_preflight import get_preflight_validator
+            
+            tokenizer = get_tokenizer()
+            validator = get_preflight_validator()
+            
+            # Count tokens
+            token_result = tokenizer.count_tokens(prompt, model=selected_model)
+            
+            # Check if within limits (assume 4096 context for safety)
+            max_context = 4096
+            if token_result.token_count > max_context - max_tokens:
+                st.error(f"❌ Prompt too long: {token_result.token_count} tokens exceeds limit of {max_context - max_tokens}")
+                st.info("💡 Try a shorter prompt or reduce max tokens")
+                return
+            
+            st.success(f"✅ Token count: {token_result.token_count} (encoding: {token_result.encoding_name})")
+            
+            # Validate provider if cloud
+            provider_name = provider_map.get(selected_model_display, "Unknown")
+            
+            if provider_name != "Exo Local" and provider_name != "Unknown":
+                # Load provider config
+                try:
+                    import json
+                    from pathlib import Path
+                    config_path = Path.home() / ".token_manager_config.json"
+                    
+                    with open(config_path, 'r') as f:
+                        config = json.load(f)
+                    
+                    provider = next((p for p in config['providers'] if p['name'] == provider_name), None)
+                    
+                    if provider:
+                        validation = validator.validate_provider(provider_name, provider)
+                        
+                        if not validation.success:
+                            st.error(f"❌ Provider validation failed: {validation.error_message}")
+                            
+                            with st.expander("🔧 How to Fix", expanded=True):
+                                st.markdown(f"**Issue:** {validation.error_message}")
+                                st.markdown("**Steps to resolve:**")
+                                for step in validation.fix_steps:
+                                    st.markdown(f"- {step}")
+                                
+                                if validation.dashboard_url:
+                                    st.markdown(f"\n**Provider Dashboard:** [{validation.dashboard_url}]({validation.dashboard_url})")
+                                
+                                if validation.required_scopes:
+                                    st.markdown("\n**Required Permissions:**")
+                                    for scope in validation.required_scopes:
+                                        st.code(scope)
+                            
+                            return  # Don't send doomed request
+                        
+                        # Check if model is in validated list
+                        if selected_model not in validation.available_models:
+                            st.warning(f"⚠️ Model '{selected_model}' not in validated list for {provider_name}")
+                            
+                            if validation.available_models:
+                                st.info(f"💡 Try one of these validated models instead:")
+                                for alt_model in validation.available_models[:5]:
+                                    st.code(alt_model)
+                            
+                            # Ask user to confirm
+                            if not st.checkbox("⚠️ Send anyway (may fail)", key="force_send"):
+                                return
+                        else:
+                            st.success(f"✅ Provider {provider_name} validated")
+                
+                except Exception as e:
+                    st.warning(f"⚠️ Could not validate provider: {e}")
+            
+            # All checks passed, send request
             with st.spinner("Processing..."):
                 messages = [{"role": "user", "content": prompt}]
                 
