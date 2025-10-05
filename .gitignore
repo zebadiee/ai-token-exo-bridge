@@ -66,3 +66,4 @@ exo/
 tmp/
 temp/
 *.tmp
+.venv/
