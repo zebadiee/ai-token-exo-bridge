@@ -592,7 +592,7 @@ class SpiralCodexHUD:
                     for r in recoveries
                 ])
                 
-                st.dataframe(df, use_container_width=True, hide_index=True)
+                st.dataframe(df, width="stretch", hide_index=True)
             else:
                 st.info("No recovery actions yet")
         
@@ -716,7 +716,7 @@ class SpiralCodexHUD:
             height=300
         )
         
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     
     def render_model_selector(self, status: Dict):
         """Render model selection interface with chat - ONLY VALIDATED MODELS"""
@@ -882,9 +882,9 @@ class SpiralCodexHUD:
         
         col1, col2 = st.columns([3, 1])
         with col1:
-            send_button = st.button("🚀 Send Request", type="primary", use_container_width=True)
+            send_button = st.button("🚀 Send Request", type="primary", width="stretch")
         with col2:
-            clear_button = st.button("🧹 Clear", use_container_width=True)
+            clear_button = st.button("🧹 Clear", width="stretch")
         
         if clear_button:
             st.rerun()
