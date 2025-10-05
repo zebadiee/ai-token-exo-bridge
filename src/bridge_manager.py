@@ -265,14 +265,54 @@ def main():
         action="store_true",
         help="Run test request and exit"
     )
+    parser.add_argument(
+        "--auto-port",
+        action="store_true",
+        default=True,
+        help="Automatically find available port if default is in use"
+    )
     
     args = parser.parse_args()
+    
+    # Check if requested ports are available
+    exo_host = args.exo_host
+    exo_port = args.exo_port
+    
+    if args.auto_port:
+        # Try to import port utilities
+        try:
+            from port_utils import is_port_available, find_available_port
+            
+            # Check Exo port
+            if not is_port_available(exo_port, exo_host):
+                logger.warning(f"Exo port {exo_port} is in use")
+                try:
+                    new_port = find_available_port(exo_port, exo_host, port_range=50)
+                    logger.info(f"Using alternative Exo port: {new_port}")
+                    exo_port = new_port
+                except RuntimeError as e:
+                    logger.error(f"Could not find available port: {e}")
+            
+            # Check HUD port if starting HUD
+            if args.with_hud:
+                hud_port = args.hud_port
+                if not is_port_available(hud_port):
+                    logger.warning(f"HUD port {hud_port} is in use")
+                    try:
+                        new_port = find_available_port(hud_port, port_range=50)
+                        logger.info(f"Using alternative HUD port: {new_port}")
+                        args.hud_port = new_port
+                    except RuntimeError as e:
+                        logger.error(f"Could not find available HUD port: {e}")
+        
+        except ImportError:
+            logger.debug("Port utilities not available, using specified ports")
     
     # Initialize bridge
     bridge = ExoBridgeManager(
         config_path=args.config,
-        exo_host=args.exo_host,
-        exo_port=args.exo_port,
+        exo_host=exo_host,
+        exo_port=exo_port,
         enable_hud=args.with_hud,
         hud_port=args.hud_port
     )
@@ -301,6 +341,9 @@ def main():
     # Keep running
     logger.info("\n" + "=" * 60)
     logger.info("Bridge is running. Press Ctrl+C to stop.")
+    logger.info(f"Exo cluster: http://{exo_host}:{exo_port}")
+    if args.with_hud:
+        logger.info(f"HUD dashboard: http://localhost:{args.hud_port}")
     logger.info("=" * 60)
     
     try:

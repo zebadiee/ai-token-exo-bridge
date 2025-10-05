@@ -1,6 +1,7 @@
 #!/bin/bash
 # Enhanced Launcher for AI Token Manager + Exo Bridge with ReliaKit
 # Starts Exo cluster, bridge manager, and Spiral Codex HUD with self-healing
+# Includes automatic port conflict resolution
 
 set -e
 
@@ -18,6 +19,23 @@ echo "╔═══════════════════════�
 echo "║  AI Token Manager + Exo Bridge with ReliaKit Self-Healing   ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
+
+# Function to find available port
+find_available_port() {
+    local start_port=$1
+    local max_attempts=${2:-50}
+    
+    for ((i=0; i<max_attempts; i++)); do
+        local port=$((start_port + i))
+        if ! lsof -i :$port > /dev/null 2>&1; then
+            echo $port
+            return 0
+        fi
+    done
+    
+    echo -e "${RED}✗ No available port found in range $start_port-$((start_port + max_attempts))${NC}" >&2
+    return 1
+}
 
 # Check/setup virtual environment
 if [ ! -d "$SCRIPT_DIR/.venv" ]; then
@@ -38,25 +56,37 @@ if ! command -v streamlit &> /dev/null; then
     pip install -r "$SCRIPT_DIR/requirements.txt" --quiet
 fi
 
-# Check if Exo is running
+# Check Exo cluster and port
 echo -e "${YELLOW}Checking Exo cluster status...${NC}"
-if curl -s http://localhost:8000/health > /dev/null 2>&1; then
-    echo -e "${GREEN}✓ Exo cluster is running${NC}"
+EXO_PORT=8000
+
+if curl -s http://localhost:$EXO_PORT/health > /dev/null 2>&1; then
+    echo -e "${GREEN}✓ Exo cluster is running on port $EXO_PORT${NC}"
 else
+    # Check if port is in use by something else
+    if lsof -i :$EXO_PORT > /dev/null 2>&1; then
+        echo -e "${YELLOW}⚠ Port $EXO_PORT is in use by another process${NC}"
+        NEW_EXO_PORT=$(find_available_port $EXO_PORT)
+        if [ $? -eq 0 ]; then
+            echo -e "${YELLOW}→ Will use port $NEW_EXO_PORT for Exo instead${NC}"
+            EXO_PORT=$NEW_EXO_PORT
+        fi
+    fi
+    
     echo -e "${YELLOW}⚠ Exo cluster not detected${NC}"
     echo ""
-    echo "Starting Exo cluster in background..."
+    echo "Starting Exo cluster on port $EXO_PORT..."
     
     if [ -d "$HOME/exo" ]; then
         cd "$HOME/exo"
-        nohup python3 main.py > /tmp/exo_cluster.log 2>&1 &
+        nohup python3 main.py --port $EXO_PORT > /tmp/exo_cluster.log 2>&1 &
         EXO_PID=$!
-        echo "Exo PID: $EXO_PID"
+        echo "Exo PID: $EXO_PID (Port: $EXO_PORT)"
         
         echo "Waiting for Exo to start..."
         for i in {1..30}; do
-            if curl -s http://localhost:8000/health > /dev/null 2>&1; then
-                echo -e "${GREEN}✓ Exo cluster started${NC}"
+            if curl -s http://localhost:$EXO_PORT/health > /dev/null 2>&1; then
+                echo -e "${GREEN}✓ Exo cluster started on port $EXO_PORT${NC}"
                 break
             fi
             sleep 1
@@ -78,35 +108,51 @@ if [ $# -gt 0 ]; then
     MODE="$1"
 fi
 
+# Default HUD port
+HUD_PORT=8501
+
+# Check if HUD port is available
+if lsof -i :$HUD_PORT > /dev/null 2>&1; then
+    echo -e "${YELLOW}⚠ Port $HUD_PORT is already in use${NC}"
+    NEW_HUD_PORT=$(find_available_port $HUD_PORT)
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}→ Using alternative port $NEW_HUD_PORT for HUD${NC}"
+        HUD_PORT=$NEW_HUD_PORT
+    else
+        echo -e "${RED}✗ No available port found for HUD${NC}"
+        exit 1
+    fi
+fi
+
 case $MODE in
     "hud")
-        echo -e "${BLUE}Starting Spiral Codex HUD only...${NC}"
-        streamlit run src/spiral_codex_hud.py --server.port 8501
+        echo -e "${BLUE}Starting Spiral Codex HUD on port $HUD_PORT...${NC}"
+        streamlit run src/spiral_codex_hud.py --server.port $HUD_PORT
         ;;
     
     "bridge")
-        echo -e "${BLUE}Starting Bridge Manager only...${NC}"
-        python src/bridge_manager.py --with-reliakit
+        echo -e "${BLUE}Starting Bridge Manager...${NC}"
+        python src/bridge_manager.py --exo-port $EXO_PORT
         ;;
     
     "test")
         echo -e "${BLUE}Running integration test...${NC}"
-        python src/bridge_manager.py --test
+        python src/bridge_manager.py --exo-port $EXO_PORT --test
         ;;
     
     "full"|*)
         echo -e "${BLUE}Starting Full Stack...${NC}"
         echo ""
         echo "Components:"
-        echo "  1. ✓ Exo Cluster (http://localhost:8000)"
+        echo "  1. ✓ Exo Cluster (http://localhost:$EXO_PORT)"
         echo "  2. → Bridge Manager (starting...)"
-        echo "  3. → Spiral Codex HUD (http://localhost:8501)"
+        echo "  3. → Spiral Codex HUD (http://localhost:$HUD_PORT)"
         echo "  4. → ReliaKit Self-Healing (auto-enabled)"
         echo ""
         
         # Start bridge in background
         echo -e "${YELLOW}Starting bridge manager...${NC}"
-        nohup python src/bridge_manager.py > /tmp/bridge_manager.log 2>&1 &
+        nohup python src/bridge_manager.py --exo-port $EXO_PORT > /tmp/bridge_manager.log 2>&1 &
         BRIDGE_PID=$!
         echo "Bridge PID: $BRIDGE_PID"
         sleep 2
@@ -118,7 +164,7 @@ case $MODE in
         echo -e "${GREEN}║                                                              ║${NC}"
         echo -e "${GREEN}║  🌀 Spiral Codex HUD starting...                            ║${NC}"
         echo -e "${GREEN}║                                                              ║${NC}"
-        echo -e "${GREEN}║  Access at: http://localhost:8501                           ║${NC}"
+        echo -e "${GREEN}║  Access at: http://localhost:$HUD_PORT                           ║${NC}"
         echo -e "${GREEN}║                                                              ║${NC}"
         echo -e "${GREEN}║  Features:                                                   ║${NC}"
         echo -e "${GREEN}║  • Real-time Exo cluster monitoring                         ║${NC}"
@@ -126,12 +172,16 @@ case $MODE in
         echo -e "${GREEN}║  • Automatic failover tracking                              ║${NC}"
         echo -e "${GREEN}║  • Interactive model testing                                 ║${NC}"
         echo -e "${GREEN}║                                                              ║${NC}"
+        if [ $HUD_PORT -ne 8501 ]; then
+            echo -e "${YELLOW}║  ⚠ Using port $HUD_PORT (8501 was in use)                    ║${NC}"
+            echo -e "${GREEN}║                                                              ║${NC}"
+        fi
         echo -e "${GREEN}║  Press Ctrl+C to stop                                        ║${NC}"
         echo -e "${GREEN}║                                                              ║${NC}"
         echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
         echo ""
         
-        streamlit run src/spiral_codex_hud.py --server.port 8501
+        streamlit run src/spiral_codex_hud.py --server.port $HUD_PORT
         
         # Cleanup on exit
         echo ""
