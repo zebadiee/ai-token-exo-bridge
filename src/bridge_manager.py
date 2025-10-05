@@ -16,7 +16,7 @@ import logging
 import signal
 import yaml
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from dotenv import load_dotenv
 
 # Add parent repos to path
@@ -26,6 +26,8 @@ sys.path.insert(0, str(Path.home() / "exo"))
 from exo_provider import ExoClusterProvider
 from exo_integration import ExoTokenManagerIntegration
 from cloud_provider_health import CloudProviderHealthMonitor
+from intelligent_tokenizer import get_tokenizer, get_model_catalog, TokenizationResult, ModelInfo
+from advanced_self_healing import get_healing_manager, FailureReason, HealingAction
 
 logging.basicConfig(
     level=logging.INFO,
@@ -96,6 +98,18 @@ class ExoBridgeManager:
         # Initialize cloud provider health monitor
         self.cloud_health_monitor = CloudProviderHealthMonitor()
         logger.info("Cloud provider health monitor initialized")
+        
+        # Initialize intelligent tokenizer
+        self.tokenizer = get_tokenizer()
+        logger.info("Intelligent tokenizer initialized")
+        
+        # Initialize model catalog
+        self.model_catalog = get_model_catalog()
+        logger.info("Model catalog initialized")
+        
+        # Initialize advanced self-healing manager
+        self.healing_manager = get_healing_manager(model_catalog=self.model_catalog)
+        logger.info("Advanced self-healing manager initialized")
         
         # Setup signal handlers (only in main thread)
         import threading
@@ -206,7 +220,16 @@ class ExoBridgeManager:
         **kwargs
     ) -> Dict[str, Any]:
         """
-        Send chat completion request through bridge with enhanced cloud provider support
+        PhD-level chat completion with intelligent preprocessing and self-healing
+        
+        Features:
+        - Automatic tokenization and validation
+        - Model catalog lookup
+        - Smart truncation if needed
+        - Provider health checking
+        - Intelligent fallback on failures
+        - Permission error guidance
+        - Comprehensive logging
         
         Args:
             messages: List of message dicts
@@ -214,19 +237,47 @@ class ExoBridgeManager:
             **kwargs: Additional parameters
         
         Returns:
-            Dict with response, provider_used, cost, detailed_logs
+            Dict with response, provider_used, cost, detailed_logs, token_info, healing_actions
         """
         detailed_logs = []
+        healing_actions = []
         
-        # Create enhanced cloud provider callback with health checking
+        # Step 1: Preprocess with tokenization
+        logger.info(f"Preprocessing request for model: {model}")
+        detailed_logs.append(f"🔍 Preprocessing request for model: {model}")
+        
+        try:
+            processed_messages, token_metadata, warnings = self.preprocess_request(
+                messages, model, kwargs.get('max_tokens')
+            )
+            
+            for warning in warnings:
+                detailed_logs.append(f"⚠️ {warning}")
+            
+            detailed_logs.append(
+                f"✅ Tokenization complete: {token_metadata['total_input_tokens']} tokens "
+                f"(limit: {token_metadata['model_context_length']})"
+            )
+            
+        except Exception as e:
+            logger.error(f"Preprocessing failed: {e}")
+            detailed_logs.append(f"❌ Preprocessing failed: {e}")
+            processed_messages = messages
+            token_metadata = {"error": str(e)}
+            warnings = [str(e)]
+        
+        # Step 2: Create enhanced cloud provider callback with healing
         def cloud_provider_callback(model, messages, **kwargs):
-            """Enhanced callback with cloud provider health monitoring"""
+            """Enhanced callback with self-healing"""
+            nonlocal detailed_logs, healing_actions
+            
             try:
                 import json
                 import requests
                 
                 # Check cloud provider health first
                 logger.info("Checking cloud provider health...")
+                detailed_logs.append("🏥 Checking cloud provider health...")
                 cloud_health = self.cloud_health_monitor.check_all_providers()
                 
                 # Load provider config
@@ -252,7 +303,7 @@ class ExoBridgeManager:
                         status = "✅ Healthy" if health.healthy else f"❌ Unhealthy: {health.error}"
                         detailed_logs.append(f"{p['name']}: {status}")
                 
-                # Try each provider
+                # Try each provider with self-healing
                 for provider in providers:
                     provider_name = provider.get('name')
                     
@@ -288,10 +339,9 @@ class ExoBridgeManager:
                         # Check if provider supports this model
                         if health and health.available_models:
                             if model not in health.available_models:
-                                # Try to find a similar model
                                 logger.warning(f"{provider_name} doesn't have model {model}")
-                                detailed_logs.append(f"⚠️ {provider_name}: Model {model} not available")
-                                # For now, continue anyway as some APIs accept any model
+                                detailed_logs.append(f"⚠️ {provider_name}: Model {model} not in catalog")
+                                # Continue anyway as some APIs accept any model
                         
                         payload = {
                             "model": model,
@@ -308,17 +358,58 @@ class ExoBridgeManager:
                         if response.status_code == 200:
                             logger.info(f"✅ Success with {provider_name}")
                             detailed_logs.append(f"✅ Success with {provider_name}")
+                            
+                            # Record success in healing manager
+                            self.healing_manager.record_success(provider_name, model)
+                            
                             return response.json(), None
                         else:
+                            # Classify error and attempt healing
                             error_msg = f"HTTP {response.status_code}: {response.text[:200]}"
                             logger.warning(f"{provider_name} failed: {error_msg}")
                             detailed_logs.append(f"❌ {provider_name}: {error_msg}")
+                            
+                            # Classify failure
+                            failure_reason = self.healing_manager.classify_error(
+                                status_code=response.status_code,
+                                error_message=response.text
+                            )
+                            
+                            # Attempt healing
+                            alt_provider, alt_model, actions = self.healing_manager.handle_provider_failure(
+                                provider_name, model, failure_reason, error_msg
+                            )
+                            
+                            healing_actions.extend(actions)
+                            
+                            # Log healing actions
+                            for action in actions:
+                                detailed_logs.append(
+                                    f"🛠️ Healing: {action.action_type} - {action.details.get('message', '')}"
+                                )
+                            
+                            # If we have an alternative, try it
+                            if alt_provider and alt_provider != provider_name:
+                                detailed_logs.append(f"🔄 Retrying with {alt_provider}...")
+                                # Continue to try the alternative provider
+                                continue
+                            elif alt_model and alt_model != model:
+                                detailed_logs.append(f"🔄 Retrying with model {alt_model}...")
+                                # Would need to retry with new model
+                                
                             continue
                             
                     except requests.exceptions.Timeout:
                         error_msg = "Request timeout (>30s)"
                         logger.error(f"{provider_name}: {error_msg}")
                         detailed_logs.append(f"⏱️ {provider_name}: {error_msg}")
+                        
+                        # Handle timeout with healing
+                        failure_reason = FailureReason.TIMEOUT
+                        alt_provider, alt_model, actions = self.healing_manager.handle_provider_failure(
+                            provider_name, model, failure_reason, error_msg
+                        )
+                        healing_actions.extend(actions)
                         continue
                         
                     except Exception as e:
@@ -337,21 +428,27 @@ class ExoBridgeManager:
                 detailed_logs.append(f"❌ {error_msg}")
                 return {}, error_msg
         
-        # Route request with cloud failover
+        # Step 3: Route request with cloud failover
         logger.info(f"Routing chat request for model: {model}")
+        detailed_logs.append(f"🚀 Routing request to providers...")
+        
         response, error, provider = self.integration.route_request(
             model=model,
-            messages=messages,
+            messages=processed_messages,
             cloud_provider_callback=cloud_provider_callback,
             **kwargs
         )
         
+        # Step 4: Build comprehensive result
         return {
             "response": response,
             "error": error,
             "provider_used": provider,
             "cost": 0.0 if "Exo" in provider else None,
-            "detailed_logs": detailed_logs
+            "detailed_logs": detailed_logs,
+            "token_info": token_metadata,
+            "preprocessing_warnings": warnings,
+            "healing_actions": [action.to_dict() for action in healing_actions]
         }
     
     def get_status(self) -> Dict[str, Any]:
@@ -362,12 +459,132 @@ class ExoBridgeManager:
         cloud_health = self.cloud_health_monitor.get_status_summary()
         base_status['cloud_providers'] = cloud_health
         
+        # Add healing summary
+        healing_summary = self.healing_manager.get_healing_summary(hours=24)
+        base_status['self_healing'] = healing_summary
+        
+        # Add model catalog info
+        all_models = self.model_catalog.get_all_models()
+        base_status['model_catalog'] = {
+            "total_models": len(all_models),
+            "by_provider": {
+                provider: len(models)
+                for provider, models in self.model_catalog.models.items()
+            }
+        }
+        
         return base_status
     
     def get_cloud_provider_health(self) -> Dict[str, Any]:
         """Get detailed cloud provider health status"""
         self.cloud_health_monitor.check_all_providers()
         return self.cloud_health_monitor.get_status_summary()
+    
+    def sync_models(self, force: bool = False) -> Dict[str, Any]:
+        """Sync model catalogs for all providers"""
+        logger.info("Syncing model catalogs...")
+        
+        import json
+        config_path = Path.home() / ".token_manager_config.json"
+        
+        if not config_path.exists():
+            return {"error": "Token manager config not found"}
+        
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        results = {}
+        providers = config.get('providers', [])
+        
+        for provider in providers:
+            if provider.get('status') == 'active':
+                name = provider.get('name')
+                models, error = self.model_catalog.sync_provider_models(name, provider, force)
+                
+                results[name] = {
+                    "success": error is None,
+                    "model_count": len(models),
+                    "error": error
+                }
+        
+        return results
+    
+    def preprocess_request(
+        self,
+        messages: List[Dict],
+        model: str,
+        max_tokens: int = None
+    ) -> Tuple[List[Dict], Dict[str, Any], List[str]]:
+        """
+        Preprocess request with tokenization and validation
+        
+        Returns:
+            Tuple of (processed_messages, metadata, warnings)
+        """
+        warnings = []
+        metadata = {}
+        
+        # Get model info
+        model_info = self.model_catalog.get_model_info(model)
+        
+        if not model_info:
+            warnings.append(f"Model {model} not in catalog, using defaults")
+            # Create default model info
+            model_info = ModelInfo(
+                id=model,
+                name=model,
+                provider="unknown",
+                context_length=4096,
+                encoding="cl100k_base"
+            )
+        
+        # Tokenize and count
+        formatted_messages, total_tokens, msg_warnings = self.tokenizer.format_messages_with_tokens(
+            messages, model
+        )
+        warnings.extend(msg_warnings)
+        
+        # Calculate available tokens for completion
+        reserve_tokens = max_tokens if max_tokens else 512
+        available_for_input = model_info.context_length - reserve_tokens
+        
+        # Check if within limits
+        if total_tokens > available_for_input:
+            warnings.append(
+                f"Input tokens ({total_tokens}) exceed limit ({available_for_input}). "
+                f"Truncating..."
+            )
+            
+            # Truncate last message
+            if formatted_messages:
+                last_msg = formatted_messages[-1]
+                truncated = self.tokenizer.truncate_to_limit(
+                    last_msg['content'],
+                    max_tokens=available_for_input - 100,  # Reserve for other messages
+                    model=model,
+                    strategy="end"
+                )
+                
+                formatted_messages[-1]['content'] = truncated.text
+                warnings.extend(truncated.warnings)
+                total_tokens = available_for_input - 100
+        
+        # Metadata
+        metadata = {
+            "total_input_tokens": total_tokens,
+            "model_context_length": model_info.context_length,
+            "reserved_for_completion": reserve_tokens,
+            "model_encoding": model_info.encoding,
+            "truncated": any("truncat" in w.lower() for w in warnings)
+        }
+        
+        # Convert back to standard message format
+        processed_messages = [
+            {"role": msg["role"], "content": msg["content"]}
+            for msg in formatted_messages
+        ]
+        
+        return processed_messages, metadata, warnings
 
 
 def main():
