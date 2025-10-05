@@ -19,6 +19,25 @@ echo "║  AI Token Manager + Exo Bridge with ReliaKit Self-Healing   ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
 
+# Check/setup virtual environment
+if [ ! -d "$SCRIPT_DIR/.venv" ]; then
+    echo -e "${YELLOW}Setting up virtual environment...${NC}"
+    python3 -m venv "$SCRIPT_DIR/.venv"
+    source "$SCRIPT_DIR/.venv/bin/activate"
+    pip install --upgrade pip --quiet
+    pip install -r "$SCRIPT_DIR/requirements.txt" --quiet
+    echo -e "${GREEN}✓ Virtual environment created and dependencies installed${NC}"
+else
+    source "$SCRIPT_DIR/.venv/bin/activate"
+fi
+
+# Verify Streamlit is available
+if ! command -v streamlit &> /dev/null; then
+    echo -e "${RED}✗ Streamlit not found in virtual environment${NC}"
+    echo "Installing dependencies..."
+    pip install -r "$SCRIPT_DIR/requirements.txt" --quiet
+fi
+
 # Check if Exo is running
 echo -e "${YELLOW}Checking Exo cluster status...${NC}"
 if curl -s http://localhost:8000/health > /dev/null 2>&1; then
