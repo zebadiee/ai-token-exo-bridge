@@ -92,9 +92,11 @@ class ExoBridgeManager:
         self.hud_port = hud_port or self.config['monitoring']['hud_port']
         self.running = False
         
-        # Setup signal handlers
-        signal.signal(signal.SIGINT, self._signal_handler)
-        signal.signal(signal.SIGTERM, self._signal_handler)
+        # Setup signal handlers (only in main thread)
+        import threading
+        if threading.current_thread() == threading.main_thread():
+            signal.signal(signal.SIGINT, self._signal_handler)
+            signal.signal(signal.SIGTERM, self._signal_handler)
     
     def _load_config(self, config_path: Optional[str] = None) -> Dict[str, Any]:
         """Load configuration from YAML file"""
@@ -209,9 +211,82 @@ class ExoBridgeManager:
         Returns:
             Dict with response, provider_used, cost
         """
+        # Create cloud provider callback using direct API calls
+        def cloud_provider_callback(model, messages, **kwargs):
+            """Callback to use cloud providers directly"""
+            try:
+                import json
+                import requests
+                
+                # Load provider config
+                config_path = Path.home() / ".token_manager_config.json"
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                
+                # Find active cloud providers (skip Exo)
+                providers = [p for p in config.get('providers', []) 
+                           if p.get('status') == 'active' and p.get('type') != 'local']
+                
+                if not providers:
+                    return {}, "No cloud providers configured"
+                
+                # Try each provider in priority order
+                providers.sort(key=lambda x: x.get('priority', 999))
+                
+                for provider in providers:
+                    try:
+                        provider_name = provider.get('name')
+                        base_url = provider.get('base_url')
+                        chat_endpoint = provider.get('chat_endpoint')
+                        headers = provider.get('headers', {})
+                        
+                        # Get API key
+                        api_key = provider.get('api_key')
+                        if not api_key and provider.get('api_key_encrypted'):
+                            # Decrypt if needed (simplified - just use as-is for now)
+                            api_key = provider.get('api_key_encrypted')
+                        
+                        if not api_key:
+                            continue
+                        
+                        # Add authorization header
+                        headers['Authorization'] = f"Bearer {api_key}"
+                        
+                        # Build request
+                        url = f"{base_url}/{chat_endpoint}" if not chat_endpoint.startswith('http') else chat_endpoint
+                        payload = {
+                            "model": model,
+                            "messages": messages,
+                            **kwargs
+                        }
+                        
+                        logger.info(f"Trying cloud provider: {provider_name}")
+                        
+                        # Make request
+                        response = requests.post(url, json=payload, headers=headers, timeout=30)
+                        
+                        if response.status_code == 200:
+                            logger.info(f"Success with {provider_name}")
+                            return response.json(), None
+                        else:
+                            logger.warning(f"{provider_name} returned {response.status_code}")
+                            continue
+                            
+                    except Exception as e:
+                        logger.error(f"Provider {provider.get('name')} failed: {e}")
+                        continue
+                
+                return {}, "All cloud providers failed"
+                
+            except Exception as e:
+                logger.error(f"Cloud provider callback failed: {e}")
+                return {}, str(e)
+        
+        # Route request with cloud failover
         response, error, provider = self.integration.route_request(
             model=model,
             messages=messages,
+            cloud_provider_callback=cloud_provider_callback,
             **kwargs
         )
         

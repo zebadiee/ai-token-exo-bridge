@@ -1,0 +1,56 @@
+# AI Token Manager + Exo Bridge Configuration
+# This file configures the bridge between AI Token Manager and Exo cluster
+
+# Exo Cluster Configuration
+exo:
+  primary_host: localhost
+  primary_port: 8000
+  auto_discover: true
+  health_check_interval: 10  # seconds
+  node_timeout: 30  # seconds
+
+# Cloud Provider API Keys (Optional - can also be managed via HUD)
+# These will be used if not already configured in token_manager_config.json
+api_keys:
+  openrouter: ""  # Set your OpenRouter API key here or leave empty to use token manager config
+  huggingface: ""  # Set your HuggingFace token here or leave empty to use token manager config
+
+# Failover Configuration
+failover:
+  enabled: true
+  prefer_local: true  # Prefer Exo cluster over cloud providers
+  cloud_providers:
+    - openrouter
+    - huggingface
+
+# Monitoring & HUD
+monitoring:
+  enable_hud: false  # Set to true to auto-start HUD
+  hud_port: 8501
+  metrics_retention: 100  # Number of historical metrics to retain
+
+# Integration Settings
+integration:
+  token_manager_config: ~/.token_manager_config.json
+  auto_add_exo_provider: true
+  exo_provider_priority: 0  # Higher priority = used first (0 is highest)
+
+# ReliaKit Self-Healing (Optional)
+reliakit:
+  enabled: true  # Enable automatic recovery
+  health_check_interval: 30  # seconds
+  auto_restart_failed_nodes: true
+
+# Logging
+logging:
+  level: INFO
+  file: logs/bridge.log
+  max_size: 10485760  # 10MB
+  backup_count: 5
+
+# Advanced Settings
+advanced:
+  request_timeout: 120  # seconds
+  retry_attempts: 3
+  retry_delay: 2  # seconds
+  max_concurrent_requests: 10

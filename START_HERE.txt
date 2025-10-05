@@ -1,0 +1,20 @@
+╔══════════════════════════════════════════════════════════════╗
+║                                                              ║
+║  🌀 SPIRAL CODEX HUD - Quick Start                          ║
+║                                                              ║
+╚══════════════════════════════════════════════════════════════╝
+
+COPY AND PASTE THIS COMMAND:
+
+cd ~/ai-token-exo-bridge && source .venv/bin/activate && streamlit run src/spiral_codex_hud.py
+
+
+Then open your browser to: http://localhost:8501
+
+
+Alternative (using script):
+
+./start_hud.sh
+
+
+That's it! 🚀
