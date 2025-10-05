@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path.home() / "exo"))
 
 from exo_provider import ExoClusterProvider
 from exo_integration import ExoTokenManagerIntegration
+from cloud_provider_health import CloudProviderHealthMonitor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -91,6 +92,10 @@ class ExoBridgeManager:
         self.enable_hud = enable_hud or self.config['monitoring']['enable_hud']
         self.hud_port = hud_port or self.config['monitoring']['hud_port']
         self.running = False
+        
+        # Initialize cloud provider health monitor
+        self.cloud_health_monitor = CloudProviderHealthMonitor()
+        logger.info("Cloud provider health monitor initialized")
         
         # Setup signal handlers (only in main thread)
         import threading
@@ -201,7 +206,7 @@ class ExoBridgeManager:
         **kwargs
     ) -> Dict[str, Any]:
         """
-        Send chat completion request through bridge
+        Send chat completion request through bridge with enhanced cloud provider support
         
         Args:
             messages: List of message dicts
@@ -209,14 +214,20 @@ class ExoBridgeManager:
             **kwargs: Additional parameters
         
         Returns:
-            Dict with response, provider_used, cost
+            Dict with response, provider_used, cost, detailed_logs
         """
-        # Create cloud provider callback using direct API calls
+        detailed_logs = []
+        
+        # Create enhanced cloud provider callback with health checking
         def cloud_provider_callback(model, messages, **kwargs):
-            """Callback to use cloud providers directly"""
+            """Enhanced callback with cloud provider health monitoring"""
             try:
                 import json
                 import requests
+                
+                # Check cloud provider health first
+                logger.info("Checking cloud provider health...")
+                cloud_health = self.cloud_health_monitor.check_all_providers()
                 
                 # Load provider config
                 config_path = Path.home() / ".token_manager_config.json"
@@ -228,61 +239,106 @@ class ExoBridgeManager:
                            if p.get('status') == 'active' and p.get('type') != 'local']
                 
                 if not providers:
+                    detailed_logs.append("❌ No cloud providers configured")
                     return {}, "No cloud providers configured"
                 
-                # Try each provider in priority order
+                # Sort by priority and filter by health
                 providers.sort(key=lambda x: x.get('priority', 999))
                 
+                # Log available providers
+                for p in providers:
+                    health = cloud_health.get(p['name'])
+                    if health:
+                        status = "✅ Healthy" if health.healthy else f"❌ Unhealthy: {health.error}"
+                        detailed_logs.append(f"{p['name']}: {status}")
+                
+                # Try each provider
                 for provider in providers:
+                    provider_name = provider.get('name')
+                    
                     try:
-                        provider_name = provider.get('name')
+                        # Check if provider is healthy
+                        health = cloud_health.get(provider_name)
+                        if health and not health.healthy:
+                            detailed_logs.append(f"⏭️ Skipping {provider_name}: {health.error}")
+                            logger.warning(f"Skipping unhealthy provider: {provider_name}")
+                            continue
+                        
                         base_url = provider.get('base_url')
                         chat_endpoint = provider.get('chat_endpoint')
-                        headers = provider.get('headers', {})
+                        headers = provider.get('headers', {}).copy()
                         
                         # Get API key
-                        api_key = provider.get('api_key')
-                        if not api_key and provider.get('api_key_encrypted'):
-                            # Decrypt if needed (simplified - just use as-is for now)
-                            api_key = provider.get('api_key_encrypted')
+                        api_key = provider.get('api_key') or provider.get('api_key_encrypted')
                         
                         if not api_key:
+                            detailed_logs.append(f"⏭️ Skipping {provider_name}: No API key")
+                            logger.warning(f"{provider_name}: No API key configured")
                             continue
                         
                         # Add authorization header
                         headers['Authorization'] = f"Bearer {api_key}"
                         
-                        # Build request
-                        url = f"{base_url}/{chat_endpoint}" if not chat_endpoint.startswith('http') else chat_endpoint
+                        # Build request URL
+                        if chat_endpoint.startswith('http'):
+                            url = chat_endpoint
+                        else:
+                            url = f"{base_url}/{chat_endpoint}"
+                        
+                        # Check if provider supports this model
+                        if health and health.available_models:
+                            if model not in health.available_models:
+                                # Try to find a similar model
+                                logger.warning(f"{provider_name} doesn't have model {model}")
+                                detailed_logs.append(f"⚠️ {provider_name}: Model {model} not available")
+                                # For now, continue anyway as some APIs accept any model
+                        
                         payload = {
                             "model": model,
                             "messages": messages,
                             **kwargs
                         }
                         
-                        logger.info(f"Trying cloud provider: {provider_name}")
+                        logger.info(f"Trying {provider_name} at {url}")
+                        detailed_logs.append(f"🔄 Trying {provider_name}...")
                         
                         # Make request
                         response = requests.post(url, json=payload, headers=headers, timeout=30)
                         
                         if response.status_code == 200:
-                            logger.info(f"Success with {provider_name}")
+                            logger.info(f"✅ Success with {provider_name}")
+                            detailed_logs.append(f"✅ Success with {provider_name}")
                             return response.json(), None
                         else:
-                            logger.warning(f"{provider_name} returned {response.status_code}")
+                            error_msg = f"HTTP {response.status_code}: {response.text[:200]}"
+                            logger.warning(f"{provider_name} failed: {error_msg}")
+                            detailed_logs.append(f"❌ {provider_name}: {error_msg}")
                             continue
                             
+                    except requests.exceptions.Timeout:
+                        error_msg = "Request timeout (>30s)"
+                        logger.error(f"{provider_name}: {error_msg}")
+                        detailed_logs.append(f"⏱️ {provider_name}: {error_msg}")
+                        continue
+                        
                     except Exception as e:
-                        logger.error(f"Provider {provider.get('name')} failed: {e}")
+                        error_msg = str(e)
+                        logger.error(f"{provider_name} exception: {error_msg}")
+                        detailed_logs.append(f"❌ {provider_name}: {error_msg}")
                         continue
                 
-                return {}, "All cloud providers failed"
+                final_error = "All cloud providers failed. See detailed logs."
+                detailed_logs.append(f"❌ {final_error}")
+                return {}, final_error
                 
             except Exception as e:
-                logger.error(f"Cloud provider callback failed: {e}")
-                return {}, str(e)
+                error_msg = f"Cloud provider callback failed: {e}"
+                logger.error(error_msg)
+                detailed_logs.append(f"❌ {error_msg}")
+                return {}, error_msg
         
         # Route request with cloud failover
+        logger.info(f"Routing chat request for model: {model}")
         response, error, provider = self.integration.route_request(
             model=model,
             messages=messages,
@@ -294,12 +350,24 @@ class ExoBridgeManager:
             "response": response,
             "error": error,
             "provider_used": provider,
-            "cost": 0.0 if "Exo" in provider else None
+            "cost": 0.0 if "Exo" in provider else None,
+            "detailed_logs": detailed_logs
         }
     
     def get_status(self) -> Dict[str, Any]:
         """Get comprehensive bridge status"""
-        return self.integration.get_unified_status()
+        base_status = self.integration.get_unified_status()
+        
+        # Add cloud provider health
+        cloud_health = self.cloud_health_monitor.get_status_summary()
+        base_status['cloud_providers'] = cloud_health
+        
+        return base_status
+    
+    def get_cloud_provider_health(self) -> Dict[str, Any]:
+        """Get detailed cloud provider health status"""
+        self.cloud_health_monitor.check_all_providers()
+        return self.cloud_health_monitor.get_status_summary()
 
 
 def main():

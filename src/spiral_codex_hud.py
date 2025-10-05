@@ -156,6 +156,36 @@ class SpiralCodexHUD:
                         health_endpoint="/health"
                     )
                     
+                    # Add cloud providers as monitoring targets
+                    try:
+                        import json
+                        from pathlib import Path
+                        config_path = Path.home() / ".token_manager_config.json"
+                        
+                        if config_path.exists():
+                            with open(config_path, 'r') as f:
+                                config = json.load(f)
+                            
+                            # Add each active cloud provider
+                            for provider in config.get('providers', []):
+                                if provider.get('status') == 'active' and provider.get('type') != 'local':
+                                    provider_name = provider.get('name')
+                                    base_url = provider.get('base_url')
+                                    
+                                    # Determine health endpoint (try common paths)
+                                    health_endpoint = provider.get('health_endpoint', '/health')
+                                    
+                                    # Add to monitoring
+                                    st.session_state.reliakit_manager.add_target(
+                                        name=f"cloud_{provider_name.lower().replace(' ', '_')}",
+                                        url=base_url,
+                                        health_endpoint=health_endpoint
+                                    )
+                                    
+                                    st.info(f"Added {provider_name} to self-healing monitoring")
+                    except Exception as e:
+                        st.warning(f"Could not add cloud providers to ReliaKit: {e}")
+                    
                     # Start monitoring
                     st.session_state.reliakit_manager.start()
                     
@@ -751,8 +781,23 @@ class SpiralCodexHUD:
                         max_tokens=max_tokens
                     )
                     
+                    # Show detailed logs if available
+                    if result.get('detailed_logs'):
+                        with st.expander("📋 Detailed Logs", expanded=True):
+                            for log in result['detailed_logs']:
+                                st.text(log)
+                    
                     if result.get('error'):
                         st.error(f"Error: {result['error']}")
+                        
+                        # Show cloud provider health on error
+                        if "cloud" in result['error'].lower() or "failed" in result['error'].lower():
+                            st.warning("💡 **Tip:** Check cloud provider health in the Provider Status section below")
+                            
+                            # Auto-run health check
+                            if st.button("🔍 Check Cloud Provider Health Now"):
+                                health = st.session_state.bridge_manager.get_cloud_provider_health()
+                                st.json(health)
                     else:
                         st.success(f"✅ Response from {result['provider_used']}")
                         
@@ -782,8 +827,82 @@ class SpiralCodexHUD:
                         st.code(traceback.format_exc())
     
     def render_provider_status(self, status: Dict):
-        """Render all provider status (Exo + Cloud providers)"""
-        st.subheader("🌐 Provider Status & Routing")
+        """Render all provider status (Exo + Cloud providers) with real-time health"""
+        st.subheader("🌐 Provider Status & Health Monitoring")
+        
+        # Add cloud provider health check button
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.markdown("**Real-time Provider Health:**")
+        with col2:
+            if st.button("🔍 Check Health Now", key="check_cloud_health"):
+                with st.spinner("Checking cloud providers..."):
+                    if st.session_state.bridge_manager:
+                        health = st.session_state.bridge_manager.get_cloud_provider_health()
+                        st.session_state.cloud_health = health
+        
+        # Display cloud provider health if available
+        if hasattr(st.session_state, 'cloud_health') and st.session_state.cloud_health:
+            cloud_health = st.session_state.cloud_health
+            
+            # Summary metrics
+            summary = cloud_health.get('summary', {})
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.metric("Total Providers", summary.get('total', 0))
+            with col2:
+                healthy = summary.get('healthy', 0)
+                total = summary.get('total', 0)
+                st.metric("Healthy Providers", f"{healthy}/{total}")
+            with col3:
+                last_check = summary.get('last_check', 'Never')
+                if last_check and last_check != 'Never':
+                    from datetime import datetime
+                    check_time = datetime.fromisoformat(last_check)
+                    st.metric("Last Check", check_time.strftime("%H:%M:%S"))
+                else:
+                    st.metric("Last Check", "Never")
+            
+            st.markdown("---")
+            
+            # Individual provider health
+            providers_health = cloud_health.get('providers', {})
+            for provider_name, health_info in providers_health.items():
+                is_healthy = health_info.get('healthy', False)
+                status_icon = "🟢" if is_healthy else "🔴"
+                error = health_info.get('error', '')
+                
+                with st.expander(f"{status_icon} {provider_name} - {'HEALTHY' if is_healthy else 'UNHEALTHY'}", 
+                                expanded=not is_healthy):
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    with col1:
+                        latency = health_info.get('latency_ms', 0)
+                        st.metric("Latency", f"{latency:.0f} ms")
+                    
+                    with col2:
+                        model_count = health_info.get('model_count', 0)
+                        st.metric("Models", model_count)
+                    
+                    with col3:
+                        failures = health_info.get('consecutive_failures', 0)
+                        st.metric("Failures", failures)
+                    
+                    with col4:
+                        success_rate = health_info.get('success_rate', 0)
+                        st.metric("Success Rate", f"{success_rate:.1f}%")
+                    
+                    if error:
+                        st.error(f"**Error:** {error}")
+                    
+                    # Show available models (first few)
+                    models = health_info.get('available_models', [])
+                    if models:
+                        st.markdown("**Sample Models:**")
+                        st.code(", ".join(models[:5]))
+        
+        st.markdown("---")
         
         # Try to get providers from multiple sources
         token_providers = []
@@ -807,7 +926,8 @@ class SpiralCodexHUD:
             except Exception as e:
                 st.error(f"Failed to load providers: {e}")
         
-        # Display each provider
+        # Display each provider configuration
+        st.markdown("### 📋 Provider Configurations")
         if token_providers:
             for provider in token_providers:
                 provider_name = provider.get("name", "Unknown")
@@ -817,7 +937,7 @@ class SpiralCodexHUD:
                 # Determine status icon and color
                 if provider_status == "active":
                     status_icon = "🟢"
-                    status_text = "ONLINE"
+                    status_text = "ACTIVE"
                     status_class = "status-healthy"
                 elif provider_status == "disabled":
                     status_icon = "🔴"
