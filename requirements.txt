@@ -1,0 +1,38 @@
+# AI Token Manager + Exo Bridge Dependencies
+# Python 3.12+ required
+
+# Core dependencies
+requests>=2.31.0
+pyyaml>=6.0
+python-dotenv>=1.0.0
+aiohttp>=3.9.0
+
+# Monitoring & UI
+streamlit>=1.28.0
+plotly>=5.17.0
+pandas>=2.0.0
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+pytest-mock>=3.11.0
+
+# Development
+black>=23.0.0
+flake8>=6.0.0
+mypy>=1.5.0
+pre-commit>=3.3.0
+
+# Optional: If you want to import from parent repos directly
+# (Alternatively, use sys.path manipulation)
+# -e ../ai-token-manager
+# -e ../exo
+
+# Logging
+structlog>=23.1.0
+colorlog>=6.7.0
+
+# Utils
+tenacity>=8.2.0  # For retry logic
+httpx>=0.24.0    # Alternative HTTP client
